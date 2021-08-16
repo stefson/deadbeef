@@ -464,11 +464,12 @@ _setformat_apply (void) {
 
 static int
 palsa_setformat (ddb_waveformat_t *fmt) {
+    int res = 0;
     LOCK;
     _setformat_requested = 1;
     memcpy (&requested_fmt, fmt, sizeof (ddb_waveformat_t));
     UNLOCK;
-    return 0;
+    return res;
 }
 
 static int
@@ -507,6 +508,7 @@ static int
 palsa_play (void) {
     int err = 0;
     LOCK;
+    _setformat_requested = 0;
     if (!audio) {
         err = palsa_init ();
     }
@@ -630,20 +632,11 @@ palsa_thread (void *context) {
         }
 
         // setformat
-        int res = 0;
         if (_setformat_requested) {
-            res = _setformat_apply ();
+            _setformat_apply ();
             _setformat_requested = 0;
         }
 
-        if (res != 0) {
-            deadbeef->thread_detach (alsa_tid);
-            alsa_terminate = 1;
-            UNLOCK;
-            break;
-        }
-
-        res = 0;
         // wait for buffer
         avail = snd_pcm_avail_update (audio);
         if (avail < 0) {
