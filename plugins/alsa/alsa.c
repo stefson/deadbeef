@@ -20,7 +20,6 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/prctl.h>
-#include <pthread.h>
 #include "../../deadbeef.h"
 #ifdef HAVE_CONFIG_H
 #include "../../config.h"
@@ -43,8 +42,6 @@ DB_functions_t *deadbeef;
 
 static snd_pcm_t *audio;
 static int alsa_terminate;
-
-static int _setformat_requested;
 static ddb_waveformat_t requested_fmt;
 static ddb_playback_state_t state;
 static uintptr_t mutex;
@@ -216,7 +213,7 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
     snd_pcm_hw_params_get_format (hw_params, &sample_fmt);
     trace ("chosen sample format: %04Xh\n", (int)sample_fmt);
 
-    unsigned val = (unsigned)plugin.fmt.samplerate;
+    int val = plugin.fmt.samplerate;
     int ret = 0;
 
     if ((err = snd_pcm_hw_params_set_rate_resample (audio, hw_params, conf_alsa_resample)) < 0) {
@@ -233,12 +230,12 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
     plugin.fmt.samplerate = val;
     trace ("chosen samplerate: %d Hz\n", val);
 
-    unsigned chanmin, chanmax;
+    int chanmin, chanmax;
     snd_pcm_hw_params_get_channels_min (hw_params, &chanmin);
     snd_pcm_hw_params_get_channels_max (hw_params, &chanmax);
 
     trace ("minchan: %d, maxchan: %d\n", chanmin, chanmax);
-    unsigned nchan = (unsigned)plugin.fmt.channels;
+    int nchan = plugin.fmt.channels;
     if (nchan > chanmax) {
         nchan = chanmax;
     }
@@ -293,9 +290,6 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
         plugin.fmt.bps = 32;
         plugin.fmt.is_float = 1;
         break;
-    default:
-        fprintf (stderr, "Unsupported sample format %d\n", sample_fmt);
-        goto error;
     }
 
     trace ("chosen bps: %d (%s)\n", plugin.fmt.bps, plugin.fmt.is_float ? "float" : "int");
@@ -431,10 +425,13 @@ open_error:
 }
 
 static int
-_setformat_apply (void) {
-    trace ("palsa_setformat %dbit %s %dch %dHz channelmask=%X\n", requested_fmt.bps, requested_fmt.is_float ? "float" : "int", requested_fmt.channels, requested_fmt.samplerate, requested_fmt.channelmask);
+palsa_setformat (ddb_waveformat_t *fmt) {
+    LOCK;
+    memcpy (&requested_fmt, fmt, sizeof (ddb_waveformat_t));
+    trace ("palsa_setformat %dbit %s %dch %dHz channelmask=%X\n", requested_fmt.bps, fmt->is_float ? "float" : "int", fmt->channels, fmt->samplerate, fmt->channelmask);
     if (!audio
         || !memcmp (&requested_fmt, &plugin.fmt, sizeof (ddb_waveformat_t))) {
+        UNLOCK;
         return 0;
     }
     else {
@@ -444,32 +441,32 @@ _setformat_apply (void) {
         "channels %d -> %d\n"
         "samplerate %d -> %d\n"
         "channelmask %d -> %d\n"
-        , requested_fmt.bps, plugin.fmt.bps
-        , requested_fmt.is_float, plugin.fmt.is_float
-        , requested_fmt.channels, plugin.fmt.channels
-        , requested_fmt.samplerate, plugin.fmt.samplerate
-        , requested_fmt.channelmask, plugin.fmt.channelmask
+        , fmt->bps, plugin.fmt.bps
+        , fmt->is_float, plugin.fmt.is_float
+        , fmt->channels, plugin.fmt.channels
+        , fmt->samplerate, plugin.fmt.samplerate
+        , fmt->channelmask, plugin.fmt.channelmask
         );
+    }
+    ddb_playback_state_t state = palsa_get_state ();
+    if (state == DDB_PLAYBACK_STATE_PLAYING) {
+        palsa_pause ();
     }
     int ret = palsa_set_hw_params (&requested_fmt);
     if (ret < 0) {
         trace ("palsa_setformat: impossible to set requested format\n");
         // even if it failed -- copy the format
         memcpy (&plugin.fmt, &requested_fmt, sizeof (ddb_waveformat_t));
+        UNLOCK;
         return -1;
     }
     trace ("new format %dbit %s %dch %dHz channelmask=%X\n", plugin.fmt.bps, plugin.fmt.is_float ? "float" : "int", plugin.fmt.channels, plugin.fmt.samplerate, plugin.fmt.channelmask);
-    return 0;
-}
-
-static int
-palsa_setformat (ddb_waveformat_t *fmt) {
-    int res = 0;
-    LOCK;
-    _setformat_requested = 1;
-    memcpy (&requested_fmt, fmt, sizeof (ddb_waveformat_t));
+    if (state == DDB_PLAYBACK_STATE_PLAYING) {
+        palsa_unpause ();
+    }
     UNLOCK;
-    return res;
+
+    return 0;
 }
 
 static int
@@ -508,7 +505,6 @@ static int
 palsa_play (void) {
     int err = 0;
     LOCK;
-    _setformat_requested = 0;
     if (!audio) {
         err = palsa_init ();
     }
@@ -629,12 +625,6 @@ palsa_thread (void *context) {
             UNLOCK;
             usleep (10000);
             continue;
-        }
-
-        // setformat
-        if (_setformat_requested) {
-            _setformat_apply ();
-            _setformat_requested = 0;
         }
 
         // wait for buffer
