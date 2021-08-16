@@ -192,7 +192,6 @@ static int pulse_pause(void);
 
 static int
 _setformat_apply (void) {
-    _setformat_requested = 0;
     if (!memcmp (&requested_fmt, &plugin.fmt, sizeof (ddb_waveformat_t))) {
         return 0;
     }
@@ -310,6 +309,7 @@ static void pulse_thread(void *context)
         int res = 0;
         if (_setformat_requested) {
             res = _setformat_apply ();
+            _setformat_requested = 0;
         }
         if (res != 0) {
             deadbeef->thread_detach (pulse_tid);
